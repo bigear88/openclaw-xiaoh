@@ -2,3 +2,11 @@
 mcp>=1.0.0
 psutil>=5.9.0
 httpx>=0.25.0
+
+# 瀏覽器自動化（有頭 Chrome，非 headless）
+playwright>=1.40.0
+
+# 瀏覽器監控面板
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+websockets>=12.0

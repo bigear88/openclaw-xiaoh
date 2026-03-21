@@ -260,9 +260,113 @@ TOOLS = [
             "required": ["message"],
         },
     ),
+    # ========== 瀏覽器自動化工具（有頭 Chrome）==========
+    Tool(
+        name="browser_navigate",
+        description="開啟有頭 Chrome 瀏覽器並導航到指定 URL。所有瀏覽器操作都使用可見 Chrome（非 headless），可從監控面板即時觀看。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "要導航的 URL"},
+                "wait_until": {
+                    "type": "string",
+                    "enum": ["load", "domcontentloaded", "networkidle"],
+                    "description": "等待策略（預設 networkidle）",
+                },
+            },
+            "required": ["url"],
+        },
+    ),
+    Tool(
+        name="browser_screenshot",
+        description="對當前瀏覽器頁面截圖。支援全頁截圖和 CSS 選擇器元素截圖。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "output_name": {"type": "string", "description": "截圖檔名（不含副檔名）"},
+                "full_page": {"type": "boolean", "description": "是否截全頁（預設 False）"},
+                "selector": {"type": "string", "description": "CSS 選擇器，只截取特定元素"},
+            },
+        },
+    ),
+    Tool(
+        name="browser_click",
+        description="在瀏覽器中點擊指定元素。使用 CSS 選擇器定位。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "selector": {"type": "string", "description": "CSS 選擇器"},
+                "wait_after_ms": {"type": "integer", "description": "點擊後等待毫秒數（預設 1000）"},
+            },
+            "required": ["selector"],
+        },
+    ),
+    Tool(
+        name="browser_fill",
+        description="在瀏覽器輸入框中填入文字。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "selector": {"type": "string", "description": "輸入框的 CSS 選擇器"},
+                "value": {"type": "string", "description": "要填入的文字"},
+            },
+            "required": ["selector", "value"],
+        },
+    ),
+    Tool(
+        name="browser_evaluate",
+        description="在瀏覽器頁面中執行 JavaScript 程式碼。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "script": {"type": "string", "description": "要執行的 JavaScript 程式碼"},
+            },
+            "required": ["script"],
+        },
+    ),
+    Tool(
+        name="browser_get_text",
+        description="取得當前頁面的文字內容（前 5000 字元）。",
+        inputSchema={
+            "type": "object",
+            "properties": {},
+        },
+    ),
+    Tool(
+        name="browser_scroll",
+        description="捲動瀏覽器頁面。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "direction": {
+                    "type": "string",
+                    "enum": ["up", "down"],
+                    "description": "捲動方向（預設 down）",
+                },
+                "amount": {"type": "integer", "description": "捲動像素量（預設 500）"},
+            },
+        },
+    ),
+    Tool(
+        name="browser_status",
+        description="查詢瀏覽器狀態：是否運行中、當前 URL、截圖數量。",
+        inputSchema={
+            "type": "object",
+            "properties": {},
+        },
+    ),
+    Tool(
+        name="browser_close",
+        description="關閉瀏覽器，釋放記憶體（~300-500 MB）。",
+        inputSchema={
+            "type": "object",
+            "properties": {},
+        },
+    ),
+    # ========== 系統工具 ==========
     Tool(
         name="system_status",
-        description="查詢系統狀態：CPU、記憶體、磁碟使用量、已載入 agents。",
+        description="查詢系統狀態：CPU、記憶體、磁碟使用量、已載入 agents、瀏覽器狀態。",
         inputSchema={
             "type": "object",
             "properties": {},
@@ -303,10 +407,20 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     if name == "system_status":
         status = guardian.status()
         status["loaded_agents"] = loader.loaded_agents()
+        # 加入瀏覽器狀態
+        try:
+            from mcp_servers.browser.browser_manager import browser_manager
+            status["browser"] = await browser_manager.get_browser_status()
+        except Exception:
+            status["browser"] = {"browser_running": False}
         return [TextContent(type="text", text=json.dumps(status, ensure_ascii=False, indent=2))]
 
     if name == "memory_control":
         return await _handle_memory_control(arguments)
+
+    # 瀏覽器工具
+    if name.startswith("browser_"):
+        return await _handle_browser_tool(name, arguments)
 
     # Agent 呼叫前：Memory Guardian 檢查
     protection = await guardian.check_and_protect()
@@ -335,6 +449,67 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             type="text",
             text=f"❌ {name} 執行錯誤：{type(e).__name__}: {e}"
         )]
+
+
+async def _handle_browser_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+    """處理瀏覽器自動化工具（有頭 Chrome）"""
+    try:
+        from mcp_servers.browser.browser_manager import browser_manager
+    except ImportError:
+        return [TextContent(type="text", text="❌ 瀏覽器模組未安裝。請執行：pip install playwright && playwright install chromium")]
+
+    # 瀏覽器啟動前檢查記憶體（Chromium 吃 300-500MB）
+    protection = await guardian.check_and_protect()
+    if protection["level"] >= 2:
+        return [TextContent(
+            type="text",
+            text=f"⚠️ 記憶體 {protection['memory_percent']:.1f}%，無法啟動瀏覽器。"
+                 f"瀏覽器需要 ~300-500 MB，請先執行 memory_control(action='gc')。"
+        )]
+
+    try:
+        if name == "browser_navigate":
+            result = await browser_manager.navigate(
+                url=arguments["url"],
+                wait_until=arguments.get("wait_until", "networkidle"),
+            )
+        elif name == "browser_screenshot":
+            result = await browser_manager.screenshot(
+                output_name=arguments.get("output_name"),
+                full_page=arguments.get("full_page", False),
+                selector=arguments.get("selector"),
+            )
+        elif name == "browser_click":
+            result = await browser_manager.click(
+                selector=arguments["selector"],
+                wait_after_ms=arguments.get("wait_after_ms", 1000),
+            )
+        elif name == "browser_fill":
+            result = await browser_manager.fill(
+                selector=arguments["selector"],
+                value=arguments["value"],
+            )
+        elif name == "browser_evaluate":
+            result = await browser_manager.evaluate(arguments["script"])
+        elif name == "browser_get_text":
+            result = await browser_manager.get_page_text()
+        elif name == "browser_scroll":
+            result = await browser_manager.scroll(
+                direction=arguments.get("direction", "down"),
+                amount=arguments.get("amount", 500),
+            )
+        elif name == "browser_status":
+            result = await browser_manager.get_browser_status()
+        elif name == "browser_close":
+            await browser_manager.close()
+            result = {"success": True, "message": "瀏覽器已關閉，記憶體已釋放"}
+        else:
+            result = {"error": f"未知瀏覽器工具：{name}"}
+
+        return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+
+    except Exception as e:
+        return [TextContent(type="text", text=f"❌ 瀏覽器操作錯誤：{type(e).__name__}: {e}")]
 
 
 async def _handle_memory_control(arguments: dict[str, Any]) -> list[TextContent]:

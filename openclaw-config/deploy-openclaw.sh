@@ -52,7 +52,8 @@ phase1() {
         log "建立 Python venv..."
         python3 -m venv "$PROJECT_DIR/.venv"
         "$PROJECT_DIR/.venv/bin/pip" install --upgrade pip
-        "$PROJECT_DIR/.venv/bin/pip" install mcp psutil httpx
+        "$PROJECT_DIR/.venv/bin/pip" install mcp psutil httpx playwright fastapi uvicorn websockets
+        "$PROJECT_DIR/.venv/bin/playwright" install chromium
     fi
 
     log "Phase 1 完成 ✅"
@@ -71,7 +72,7 @@ phase2() {
 # Phase 3: OpenManus 整合
 # ============================================================
 phase3() {
-    log "Phase 3: OpenManus 整合"
+    log "Phase 3: OpenManus 整合 + 瀏覽器自動化"
 
     if [ -d "$OPENMANUS_DIR" ]; then
         cd "$OPENMANUS_DIR"
@@ -80,11 +81,11 @@ phase3() {
             .venv/bin/pip install -e .
         fi
 
-        # 設定 headless 瀏覽器
+        # 設定有頭瀏覽器（headless=false，避免被網站阻擋）
         mkdir -p config
         cat > config/config.toml << 'TOML'
 [browser]
-headless = true
+headless = false
 disable_security = false
 
 [llm]
@@ -93,6 +94,57 @@ api_key = "${ANTHROPIC_API_KEY}"
 TOML
     fi
 
+    # 安裝 Xvfb 虛擬顯示器（VM 上跑有頭瀏覽器用）
+    if ! command -v Xvfb &>/dev/null; then
+        log "安裝 Xvfb + x11vnc + noVNC..."
+        sudo apt-get install -y xvfb x11vnc novnc
+    fi
+
+    # 啟動虛擬顯示器（如果不在桌面環境）
+    if [ -z "${DISPLAY:-}" ]; then
+        log "啟動 Xvfb 虛擬顯示器 :99..."
+        sudo tee /etc/systemd/system/xvfb.service > /dev/null << 'EOF'
+[Unit]
+Description=Xvfb Virtual Display :99
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/Xvfb :99 -screen 0 1920x1080x24 -ac
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        sudo systemctl daemon-reload
+        sudo systemctl enable --now xvfb
+    fi
+
+    # 瀏覽器監控面板 systemd 服務
+    sudo tee /etc/systemd/system/xiaohong-browser-monitor.service > /dev/null << EOF
+[Unit]
+Description=小虹瀏覽器自動化監控面板
+After=network.target xvfb.service
+
+[Service]
+Type=simple
+User=$USER
+Environment="DISPLAY=:99"
+ExecStart=$PROJECT_DIR/.venv/bin/python -m dashboard.browser_monitor
+WorkingDirectory=$PROJECT_DIR
+Restart=always
+RestartSec=10
+MemoryMax=200M
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable xiaohong-browser-monitor
+    sudo systemctl start xiaohong-browser-monitor
+
+    log "瀏覽器監控面板：http://localhost:8765"
     log "Phase 3 完成 ✅"
 }
 

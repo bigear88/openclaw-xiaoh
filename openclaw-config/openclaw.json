@@ -18,6 +18,7 @@
       "cwd": "${HOME}/openclaw-xiaoh",
       "env": {
         "XIAOHONG_MODE": "mcp",
+        "DISPLAY": ":99",
         "TELEGRAM_BOT_TOKEN": "${TELEGRAM_BOT_TOKEN}",
         "TELEGRAM_CHAT_ID": "${TELEGRAM_CHAT_ID}"
       }
@@ -27,7 +28,8 @@
       "args": ["-m", "app.mcp.server"],
       "cwd": "${HOME}/OpenManus",
       "env": {
-        "BROWSER_HEADLESS": "true"
+        "BROWSER_HEADLESS": "false",
+        "DISPLAY": ":99"
       }
     },
     "system-monitor": {
