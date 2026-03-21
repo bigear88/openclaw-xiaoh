@@ -32,22 +32,25 @@ os.environ["XIAOHONG_MODE"] = "mcp"
 class MemoryGuardian:
     """五層記憶體保護機制"""
 
+    # 與 Notion 文件「記憶體保護與 VM 穩定性」對齊
     LEVELS = {
-        1: {"threshold": 60, "action": "log"},
-        2: {"threshold": 70, "action": "gc"},
-        3: {"threshold": 80, "action": "pause_low_priority"},
-        4: {"threshold": 90, "action": "pause_all"},
-        5: {"threshold": 95, "action": "emergency_kill"},
+        0: {"threshold": 0,  "action": "normal"},          # < 70% 正常
+        1: {"threshold": 70, "action": "pause_idle"},       # 70-85% 暫停閒置
+        2: {"threshold": 85, "action": "kill_non_critical"},# 85-92% 終止非關鍵
+        3: {"threshold": 92, "action": "emergency_kill"},   # > 92% 緊急模式
     }
 
+    # 優先級：數字越低越先被終止（與 Notion 文件對齊）
+    # 1=最高保留, 8=最先犧牲
     AGENT_PRIORITY = {
-        "general_agent": 5,      # 最高優先
-        "briefing_agent": 4,
-        "investment_agent": 4,
-        "health_agent": 3,
-        "bible_agent": 3,
-        "accounting_agent": 2,
-        "learning_agent": 2,
+        "briefing_agent": 1,     # 最高優先，最後被殺
+        "general_agent": 2,      # 回覆使用者
+        "accounting_agent": 3,   # 記帳
+        "investment_agent": 4,   # 投資分析
+        "health_agent": 5,       # 健康管理
+        "bible_agent": 6,        # 靈修
+        "learning_agent": 7,     # 學習
+        # newspaper_agent: 8     # 截圖最吃記憶體，最先犧牲
     }
 
     def __init__(self):
@@ -59,34 +62,42 @@ class MemoryGuardian:
 
     def get_current_level(self) -> int:
         pct = self.get_memory_percent()
-        level = 0
-        for lvl, info in self.LEVELS.items():
-            if pct >= info["threshold"]:
-                level = lvl
-        return level
+        if pct >= 92:
+            return 3
+        elif pct >= 85:
+            return 2
+        elif pct >= 70:
+            return 1
+        return 0
 
     async def check_and_protect(self) -> dict[str, Any]:
-        """檢查記憶體並觸發對應保護動作"""
+        """檢查記憶體並觸發對應保護動作（與 Notion 五層防護對齊）"""
         pct = self.get_memory_percent()
         level = self.get_current_level()
-        result = {"memory_percent": pct, "level": level, "action": "none"}
+        result = {"memory_percent": pct, "level": level, "action": "normal"}
 
-        if level >= 2:
+        if level >= 1:
+            # Level 1 (70-85%): 暫停閒置 agents，新任務排隊
             gc.collect()
-            result["action"] = "gc"
-
-        if level >= 3:
-            # 暫停低優先級 agents
             for name, priority in self.AGENT_PRIORITY.items():
-                if priority <= 2:
+                if priority >= 6:  # 低優先級（bible, learning）
                     self.paused_agents.add(name)
-            result["action"] = "pause_low_priority"
+            result["action"] = "pause_idle"
             result["paused"] = list(self.paused_agents)
 
-        if level >= 4:
-            # 暫停全部
+        if level >= 2:
+            # Level 2 (85-92%): 強制終止非關鍵 agents，殺 Playwright
+            for name, priority in self.AGENT_PRIORITY.items():
+                if priority >= 4:  # investment, health, bible, learning
+                    self.paused_agents.add(name)
+            result["action"] = "kill_non_critical"
+            result["paused"] = list(self.paused_agents)
+
+        if level >= 3:
+            # Level 3 (>92%): 殺光所有 agents，Telegram 緊急警報
             self.paused_agents = set(self.AGENT_PRIORITY.keys())
-            result["action"] = "pause_all"
+            result["action"] = "emergency_kill"
+            result["paused"] = list(self.paused_agents)
 
         return result
 
@@ -95,9 +106,12 @@ class MemoryGuardian:
         if agent_name in self.paused_agents:
             return False
         pct = self.get_memory_percent()
-        if pct > 85:
-            priority = self.AGENT_PRIORITY.get(agent_name, 1)
-            return priority >= 4  # 只允許高優先級
+        if pct >= 85:
+            priority = self.AGENT_PRIORITY.get(agent_name, 8)
+            return priority <= 2  # Level 2+: 只允許 briefing + general
+        if pct >= 70:
+            priority = self.AGENT_PRIORITY.get(agent_name, 8)
+            return priority <= 5  # Level 1: 排除低優先級
         return True
 
     def resume_all(self):
@@ -296,11 +310,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
     # Agent 呼叫前：Memory Guardian 檢查
     protection = await guardian.check_and_protect()
-    if protection["level"] >= 4:
+    if protection["level"] >= 3:
         return [TextContent(
             type="text",
-            text=f"⚠️ 記憶體使用量過高 ({protection['memory_percent']:.1f}%)，"
-                 f"所有 agents 已暫停。請稍後再試或執行 memory_control(action='gc')。"
+            text=f"🚨 緊急！記憶體使用量 {protection['memory_percent']:.1f}% (>92%)，"
+                 f"所有 agents 已暫停。請執行 memory_control(action='gc') 或等待記憶體釋放。"
         )]
 
     if not guardian.can_start_agent(name):
