@@ -19,6 +19,8 @@
 | 學習、課程、筆記、知識 | learning_agent | 學習助手 |
 | 晨報、晚報、新聞、報紙 | briefing_agent | 晨晚報 |
 | 聖經、經文、靈修、禱告 | bible_agent | 聖經靈修 |
+| 頻道、Telegram、未讀、整理頻道、頻道摘要 | telegram_channel_agent | Telegram 頻道整理 |
+| 瀏覽器、開網頁、截圖、打開網站 | browser_navigate / browser_screenshot | 瀏覽器自動化 |
 | 系統、CPU、記憶體、狀態 | system_status | 系統狀態 |
 | 記憶體管理、暫停、恢復 | memory_control | 記憶體管理 |
 | 其他所有對話 | general_agent | 一般對話 |

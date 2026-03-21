@@ -145,6 +145,7 @@ class AgentLoader:
         "learning_agent": ("agents.learning_agent", "LearningAgent"),
         "briefing_agent": ("agents.briefing_agent", "BriefingAgent"),
         "bible_agent": ("agents.bible_agent", "BibleAgent"),
+        "telegram_channel_agent": ("agents.telegram_channel.agent", "TelegramChannelAgent"),
     }
 
     def __init__(self):
@@ -256,6 +257,17 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "message": {"type": "string", "description": "聖經或靈修相關問題"}
+            },
+            "required": ["message"],
+        },
+    ),
+    Tool(
+        name="telegram_channel_agent",
+        description="Telegram 頻道整理 agent。讀取所有訂閱頻道的未讀訊息，頻道主訊息完整列出、其他人摘要，全部標為已讀，匯出至 Notion telegram資訊中心，CruelsHistoryofFinancial 的 PDF 自動下載到 Google Drive。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "description": "指令，如「整理頻道」「頻道摘要」"}
             },
             "required": ["message"],
         },

@@ -20,7 +20,11 @@
         "XIAOHONG_MODE": "mcp",
         "DISPLAY": ":99",
         "TELEGRAM_BOT_TOKEN": "${TELEGRAM_BOT_TOKEN}",
-        "TELEGRAM_CHAT_ID": "${TELEGRAM_CHAT_ID}"
+        "TELEGRAM_CHAT_ID": "${TELEGRAM_CHAT_ID}",
+        "TELEGRAM_API_ID": "${TELEGRAM_API_ID}",
+        "TELEGRAM_API_HASH": "${TELEGRAM_API_HASH}",
+        "NOTION_TOKEN": "${NOTION_TOKEN}",
+        "GOOGLE_DRIVE_EPAPER_FOLDER_ID": "${GOOGLE_DRIVE_EPAPER_FOLDER_ID}"
       }
     },
     "openmanus": {

@@ -215,7 +215,9 @@ phase6() {
 # 小虹排程
 30 7 * * * cd $HOME/openclaw-xiaoh && .venv/bin/python -c "from agents.briefing_agent import BriefingAgent; import asyncio; asyncio.run(BriefingAgent().newspaper_screenshot())" >> /tmp/xiaohong-cron.log 2>&1
 0 8 * * * cd $HOME/openclaw-xiaoh && .venv/bin/python -c "from agents.briefing_agent import BriefingAgent; import asyncio; asyncio.run(BriefingAgent().morning_briefing())" >> /tmp/xiaohong-cron.log 2>&1
+0 8 * * * cd $HOME/openclaw-xiaoh && .venv/bin/python -m agents.telegram_channel.agent >> /tmp/xiaohong-telegram-channel.log 2>&1
 0 20 * * * cd $HOME/openclaw-xiaoh && .venv/bin/python -c "from agents.briefing_agent import BriefingAgent; import asyncio; asyncio.run(BriefingAgent().evening_briefing())" >> /tmp/xiaohong-cron.log 2>&1
+0 20 * * * cd $HOME/openclaw-xiaoh && .venv/bin/python -m agents.telegram_channel.agent >> /tmp/xiaohong-telegram-channel.log 2>&1
 CRON
     ) | sort -u | crontab -
 
