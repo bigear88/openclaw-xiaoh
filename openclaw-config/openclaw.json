@@ -1,0 +1,52 @@
+{
+  "$schema": "https://openclaw.dev/schema/config.json",
+  "name": "小虹秘書",
+  "description": "小虹多Agent系統 — OpenClaw + MCP 架構",
+
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "botToken": "${TELEGRAM_BOT_TOKEN}",
+      "allowedChatIds": ["${TELEGRAM_CHAT_ID}"]
+    }
+  },
+
+  "mcpServers": {
+    "xiaohong-agents": {
+      "command": "${HOME}/openclaw-xiaoh/.venv/bin/python",
+      "args": ["-m", "mcp_servers.xiaohong_agents_server"],
+      "cwd": "${HOME}/openclaw-xiaoh",
+      "env": {
+        "XIAOHONG_MODE": "mcp",
+        "TELEGRAM_BOT_TOKEN": "${TELEGRAM_BOT_TOKEN}",
+        "TELEGRAM_CHAT_ID": "${TELEGRAM_CHAT_ID}"
+      }
+    },
+    "openmanus": {
+      "command": "${HOME}/OpenManus/.venv/bin/python",
+      "args": ["-m", "app.mcp.server"],
+      "cwd": "${HOME}/OpenManus",
+      "env": {
+        "BROWSER_HEADLESS": "true"
+      }
+    },
+    "system-monitor": {
+      "command": "${HOME}/openclaw-xiaoh/.venv/bin/python",
+      "args": ["-m", "mcp_servers.system_monitor_daemon"],
+      "cwd": "${HOME}/openclaw-xiaoh"
+    }
+  },
+
+  "customInstructions": "你是小虹（xiaohong），Curtis 的 AI 秘書。你說繁體中文，語氣親切但專業。你管理 7 個專業 agent，根據使用者意圖自動路由到合適的 agent。如果不確定用哪個 agent，就用 general_agent。每次回覆前先檢查 system_status 確認系統健康。",
+
+  "permissions": {
+    "allow": [
+      "mcp__xiaohong-agents__*",
+      "mcp__openmanus__browser_*",
+      "mcp__system-monitor__*"
+    ],
+    "deny": [
+      "mcp__openmanus__bash_execute"
+    ]
+  }
+}
