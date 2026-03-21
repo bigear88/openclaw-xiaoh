@@ -36,3 +36,15 @@ logs/
 
 # Claude
 .claude/
+
+# OpenClaw runtime
+.openclaw/
+AGENTS.md
+IDENTITY.md
+SOUL.md
+TOOLS.md
+USER.md
+HEARTBEAT.md
+
+# Agent data
+accounting/

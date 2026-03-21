@@ -19,8 +19,10 @@ from typing import Any, Optional
 
 # MCP SDK
 from mcp.server import Server
+from mcp.server.models import InitializationOptions
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
+from mcp.server.lowlevel.server import NotificationOptions
 
 # 設定 MCP 模式，讓 agents 不自己發 Telegram
 os.environ["XIAOHONG_MODE"] = "mcp"
@@ -562,7 +564,15 @@ async def _handle_memory_control(arguments: dict[str, Any]) -> list[TextContent]
 
 async def main():
     async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream)
+        init_options = InitializationOptions(
+            server_name="xiaohong-agents",
+            server_version="1.0.0",
+            capabilities=server.get_capabilities(
+                notification_options=NotificationOptions(),
+                experimental_capabilities={},
+            ),
+        )
+        await server.run(read_stream, write_stream, init_options)
 
 
 if __name__ == "__main__":
