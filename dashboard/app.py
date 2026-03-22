@@ -38,6 +38,7 @@ TIMERS = [
 
 LOG_DIR = Path.home() / "xiaohong" / "logs"
 OPENCLAW_LOG = Path.home() / ".openclaw" / "logs" / "openclaw.log"
+SESSIONS_JSON = Path.home() / ".openclaw" / "agents" / "xiaohong" / "sessions" / "sessions.json"
 
 
 # ── 資料收集 ──────────────────────────────────────────────────────────
@@ -231,6 +232,61 @@ def get_auth_summary() -> list[dict]:
     return results
 
 
+def get_token_stats() -> dict:
+    """從 sessions.json 讀取 token 使用量統計"""
+    if not SESSIONS_JSON.exists():
+        return {"sessions": [], "totals": {}}
+
+    try:
+        data = json.loads(SESSIONS_JSON.read_text(encoding="utf-8"))
+    except Exception:
+        return {"sessions": [], "totals": {}}
+
+    sessions = []
+    seen_ids = set()  # 去除 :run: 子 session 的重複
+    totals = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "cost": 0.0}
+
+    for key, val in data.items():
+        # 跳過 :run: 子 session（與父 session 資料相同）
+        if ":run:" in key:
+            continue
+        input_t = val.get("inputTokens", 0) or 0
+        output_t = val.get("outputTokens", 0) or 0
+        cache_r = val.get("cacheRead", 0) or 0
+        cache_w = val.get("cacheWrite", 0) or 0
+        total_t = val.get("totalTokens", 0) or 0
+        cost = val.get("estimatedCostUsd", 0) or 0
+        model = val.get("model", "?")
+        provider = val.get("modelProvider", "?")
+
+        if input_t == 0 and output_t == 0 and total_t == 0:
+            continue
+
+        # 簡化 session 名稱
+        short_name = key.replace("agent:xiaohong:", "")
+
+        sessions.append({
+            "name": short_name,
+            "provider": provider,
+            "model": model,
+            "input": input_t,
+            "output": output_t,
+            "total": total_t,
+            "cache_read": cache_r,
+            "cache_write": cache_w,
+            "cost": cost,
+        })
+
+        totals["input"] += input_t
+        totals["output"] += output_t
+        totals["cache_read"] += cache_r
+        totals["cache_write"] += cache_w
+        totals["cost"] += cost
+
+    totals["total"] = totals["input"] + totals["output"]
+    return {"sessions": sessions, "totals": totals}
+
+
 # ── HTML 生成 ─────────────────────────────────────────────────────────
 
 def _gauge(label: str, percent: float, used: str, total: str, unit: str = "GB") -> str:
@@ -268,6 +324,15 @@ def _status_badge(state: str) -> str:
     return f'<span class="badge" style="background:{c}">{state}</span>'
 
 
+def _fmt_num(n: int) -> str:
+    """格式化數字：1234567 -> 1,234,567"""
+    if n >= 1_000_000:
+        return f"{n/1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n/1_000:.1f}K"
+    return str(n)
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
     m = get_system_metrics()
@@ -275,6 +340,7 @@ async def index():
     timers = get_timer_status()
     logs = get_recent_logs()
     auth = get_auth_summary()
+    token_stats = get_token_stats()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # Gauges
@@ -314,6 +380,31 @@ async def index():
             icon = "✅" if a["ok"] else "❌"
             auth_items += f'<span class="auth-item">{icon} {a["name"]}</span>'
         auth_html = f'<div class="auth-bar">{auth_items}</div>'
+
+    # Token stats
+    tok = token_stats["totals"]
+    token_summary_html = ""
+    token_rows = ""
+    if tok:
+        token_summary_html = f"""<div class="token-summary">
+            <div class="token-card"><div class="token-num">{_fmt_num(tok.get('input', 0))}</div><div class="token-lbl">Input</div></div>
+            <div class="token-card"><div class="token-num">{_fmt_num(tok.get('output', 0))}</div><div class="token-lbl">Output</div></div>
+            <div class="token-card"><div class="token-num">{_fmt_num(tok.get('cache_read', 0))}</div><div class="token-lbl">Cache Read</div></div>
+            <div class="token-card"><div class="token-num">{_fmt_num(tok.get('cache_write', 0))}</div><div class="token-lbl">Cache Write</div></div>
+            <div class="token-card cost"><div class="token-num">${tok.get('cost', 0):.4f}</div><div class="token-lbl">Est. Cost</div></div>
+        </div>"""
+
+    for s in token_stats.get("sessions", []):
+        provider_cls = "provider-anthropic" if s["provider"] == "anthropic" else "provider-google" if s["provider"] == "google" else ""
+        token_rows += f"""<tr>
+            <td>{s['name']}</td>
+            <td><span class="provider-tag {provider_cls}">{s['provider']}</span></td>
+            <td class="mono">{s['model']}</td>
+            <td class="num">{_fmt_num(s['input'])}</td>
+            <td class="num">{_fmt_num(s['output'])}</td>
+            <td class="num">{_fmt_num(s['cache_read'])}</td>
+            <td class="num">{_fmt_num(s['cache_write'])}</td>
+        </tr>"""
 
     # Logs
     log_rows = ""
@@ -380,6 +471,22 @@ async def index():
         .log-error .log-line {{ color: #f88; }}
         .log-warn {{ background: #2a200a !important; }}
         .log-warn .log-line {{ color: #fb8; }}
+        .token-summary {{ display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }}
+        .token-card {{
+            background: #111128; border: 1px solid #1e1e3e; border-radius: 10px;
+            padding: 12px 18px; text-align: center; flex: 1; min-width: 100px;
+        }}
+        .token-card.cost {{ border-color: #e94560; }}
+        .token-num {{ font-size: 1.3em; font-weight: bold; color: #fff; }}
+        .token-card.cost .token-num {{ color: #e94560; }}
+        .token-lbl {{ font-size: 0.72em; color: #666; margin-top: 4px; }}
+        .provider-tag {{
+            display: inline-block; padding: 1px 8px; border-radius: 8px;
+            font-size: 0.75em; font-weight: 600; color: #fff; background: #555;
+        }}
+        .provider-anthropic {{ background: #d97706; }}
+        .provider-google {{ background: #2563eb; }}
+        .num {{ text-align: right; font-family: 'Cascadia Code', monospace; }}
         .log-table {{ max-height: 400px; overflow-y: auto; display: block; }}
         .log-table table {{ display: table; }}
         @media (max-width: 900px) {{
@@ -422,6 +529,15 @@ async def index():
     </div>
 
     <div class="section">
+        <div class="section-title">Token Usage</div>
+        {token_summary_html}
+        <table>
+            <tr><th>Session</th><th>Provider</th><th>Model</th><th>Input</th><th>Output</th><th>Cache Read</th><th>Cache Write</th></tr>
+            {token_rows}
+        </table>
+    </div>
+
+    <div class="section">
         <div class="section-title">Recent Logs</div>
         <div class="log-table">
             <table>
@@ -457,3 +573,8 @@ async def timers():
 @app.get("/api/auth")
 async def auth():
     return get_auth_summary()
+
+
+@app.get("/api/tokens")
+async def tokens():
+    return get_token_stats()
