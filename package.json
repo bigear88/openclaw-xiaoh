@@ -1,0 +1,16 @@
+{
+  "name": "openclaw-xiaoh",
+  "version": "1.0.0",
+  "private": true,
+  "description": "小虹多Agent系統 - OpenClaw + MCP 架構",
+  "engines": {
+    "node": ">=22.0.0 <25.0.0"
+  },
+  "scripts": {
+    "analytics": "clawalytics start --port 9174",
+    "analytics:dev": "clawalytics start --port 9174"
+  },
+  "dependencies": {
+    "clawalytics": "^0.6.55"
+  }
+}
