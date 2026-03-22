@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-小虹瀏覽器自動化監控面板
+小虹瀏覽器自動化監控面板 (agent-browser 版)
 
-提供 Web 介面即時觀看瀏覽器操作過程：
+以 agent-browser CLI 取代 Playwright，提供：
 - 即時截圖串流（每秒自動更新）
 - 操作日誌即時顯示
-- 手動控制面板（導航、截圖、點擊）
+- 手動控制面板（導航、截圖、點擊、snapshot）
 - 瀏覽器狀態監控
 
 啟動方式：
@@ -17,23 +17,18 @@ import asyncio
 import base64
 import json
 import os
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
-# 加入專案根目錄到 path
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+app = FastAPI(title="小虹統合監控", version="3.0")
 
-app = FastAPI(title="小虹統合監控", version="2.0")
-
-# CORS for clawalytics iframe
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:9174"],
@@ -45,6 +40,10 @@ app.add_middleware(
 CLAWALYTICS_PORT = 9174
 CLAWALYTICS_BASE = f"http://localhost:{CLAWALYTICS_PORT}"
 
+# 截圖目錄
+SCREENSHOTS_DIR = Path("/tmp/xiaohong-screenshots")
+SCREENSHOTS_DIR.mkdir(exist_ok=True)
+
 # 操作日誌
 operation_logs: list[dict] = []
 MAX_LOGS = 200
@@ -52,9 +51,99 @@ MAX_LOGS = 200
 # WebSocket 連線池
 ws_connections: set[WebSocket] = set()
 
+# agent-browser 環境變數
+AB_ENV = {**os.environ, "DISPLAY": ":99"}
+
+
+# ============================================================
+# agent-browser CLI 封裝
+# ============================================================
+
+def _run_ab(*args: str, timeout: int = 15) -> tuple[bool, str]:
+    """執行 agent-browser 指令，回傳 (成功, 輸出)"""
+    try:
+        r = subprocess.run(
+            ["agent-browser", *args],
+            capture_output=True, text=True, timeout=timeout, env=AB_ENV,
+        )
+        output = (r.stdout or "").strip()
+        if r.returncode != 0:
+            err = (r.stderr or "").strip()
+            return False, err or output or f"exit code {r.returncode}"
+        return True, output
+    except subprocess.TimeoutExpired:
+        return False, "timeout"
+    except Exception as e:
+        return False, str(e)
+
+
+async def _run_ab_async(*args: str, timeout: int = 15) -> tuple[bool, str]:
+    """非同步執行 agent-browser"""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: _run_ab(*args, timeout=timeout))
+
+
+async def ab_navigate(url: str) -> dict:
+    ok, out = await _run_ab_async("open", url)
+    return {"success": ok, "message": out}
+
+
+async def ab_screenshot(name: str = "") -> dict:
+    fname = name or f"shot_{int(time.time())}"
+    path = str(SCREENSHOTS_DIR / f"{fname}.png")
+    ok, out = await _run_ab_async("screenshot", path)
+    return {"success": ok, "path": path if ok else "", "message": out}
+
+
+async def ab_click(selector: str) -> dict:
+    ok, out = await _run_ab_async("click", selector)
+    return {"success": ok, "message": out}
+
+
+async def ab_snapshot(interactive: bool = True, compact: bool = True) -> dict:
+    args = ["snapshot"]
+    if interactive:
+        args.append("-i")
+    if compact:
+        args.append("-c")
+    ok, out = await _run_ab_async(*args)
+    return {"success": ok, "tree": out if ok else "", "message": out}
+
+
+async def ab_fill(selector: str, text: str) -> dict:
+    ok, out = await _run_ab_async("fill", selector, text)
+    return {"success": ok, "message": out}
+
+
+async def ab_get_status() -> dict:
+    """取得瀏覽器狀態"""
+    url_ok, url = await _run_ab_async("get", "url")
+    title_ok, title = await _run_ab_async("get", "title")
+
+    if url_ok:
+        return {
+            "browser_running": True,
+            "current_url": url,
+            "current_title": title if title_ok else "",
+        }
+    return {"browser_running": False, "current_url": "", "current_title": ""}
+
+
+async def ab_close() -> dict:
+    ok, out = await _run_ab_async("close")
+    return {"success": ok, "message": out}
+
+
+async def ab_eval(js: str) -> dict:
+    ok, out = await _run_ab_async("eval", js)
+    return {"success": ok, "result": out if ok else "", "message": out}
+
+
+# ============================================================
+# 日誌 & 廣播
+# ============================================================
 
 def add_log(action: str, detail: str = "", status: str = "info"):
-    """新增操作日誌"""
     log_entry = {
         "time": datetime.now().strftime("%H:%M:%S"),
         "action": action,
@@ -64,12 +153,10 @@ def add_log(action: str, detail: str = "", status: str = "info"):
     operation_logs.append(log_entry)
     if len(operation_logs) > MAX_LOGS:
         operation_logs.pop(0)
-    # 廣播給所有 WebSocket 連線
     asyncio.create_task(broadcast_log(log_entry))
 
 
 async def broadcast_log(log_entry: dict):
-    """廣播日誌到所有 WebSocket 連線"""
     dead = set()
     for ws in ws_connections:
         try:
@@ -80,7 +167,6 @@ async def broadcast_log(log_entry: dict):
 
 
 async def broadcast_screenshot(b64_image: str):
-    """廣播截圖到所有 WebSocket 連線"""
     dead = set()
     for ws in ws_connections:
         try:
@@ -94,21 +180,27 @@ async def broadcast_screenshot(b64_image: str):
 # 即時截圖串流（背景任務）
 # ============================================================
 
+_stream_screenshot_path = SCREENSHOTS_DIR / "_stream.jpg"
+
+
 async def screenshot_stream_loop():
     """每秒截圖一次，推送到所有 WebSocket 連線"""
-    from mcp_servers.browser.browser_manager import browser_manager
-
     while True:
         try:
-            if ws_connections and browser_manager._browser and browser_manager._browser.is_connected():
-                page = browser_manager._page
-                if page:
-                    screenshot_bytes = await page.screenshot(type="jpeg", quality=60)
-                    b64 = base64.b64encode(screenshot_bytes).decode()
+            if ws_connections:
+                path = str(_stream_screenshot_path)
+                ok, _ = await _run_ab_async(
+                    "screenshot", path,
+                    "--screenshot-format", "jpeg",
+                    "--screenshot-quality", "60",
+                    timeout=5,
+                )
+                if ok and _stream_screenshot_path.exists():
+                    b64 = base64.b64encode(_stream_screenshot_path.read_bytes()).decode()
                     await broadcast_screenshot(b64)
         except Exception:
-            pass  # 瀏覽器未啟動或已關閉時忽略
-        await asyncio.sleep(1)  # 1 FPS
+            pass
+        await asyncio.sleep(1.5)  # ~0.7 FPS to reduce overhead
 
 
 # ============================================================
@@ -127,7 +219,6 @@ async def websocket_endpoint(ws: WebSocket):
     add_log("監控連線", "新的監控畫面已連線", "info")
     try:
         while True:
-            # 接收控制指令
             data = await ws.receive_json()
             await handle_ws_command(data, ws)
     except WebSocketDisconnect:
@@ -136,37 +227,56 @@ async def websocket_endpoint(ws: WebSocket):
 
 
 async def handle_ws_command(data: dict, ws: WebSocket):
-    """處理 WebSocket 控制指令"""
-    from mcp_servers.browser.browser_manager import browser_manager
-
     cmd = data.get("command")
 
     if cmd == "navigate":
         url = data.get("url", "")
         add_log("導航", url, "info")
-        result = await browser_manager.navigate(url)
-        add_log("導航結果", json.dumps(result, ensure_ascii=False),
+        result = await ab_navigate(url)
+        add_log("導航結果", result["message"],
                 "success" if result["success"] else "error")
 
     elif cmd == "screenshot":
         add_log("手動截圖", "", "info")
-        result = await browser_manager.screenshot(output_name=f"manual_{int(time.time())}")
-        add_log("截圖完成", result.get("path", ""), "success" if result["success"] else "error")
+        result = await ab_screenshot(f"manual_{int(time.time())}")
+        add_log("截圖完成", result.get("path", ""),
+                "success" if result["success"] else "error")
 
     elif cmd == "click":
         selector = data.get("selector", "")
         add_log("點擊", selector, "info")
-        result = await browser_manager.click(selector)
-        add_log("點擊結果", json.dumps(result, ensure_ascii=False),
+        result = await ab_click(selector)
+        add_log("點擊結果", result["message"],
                 "success" if result["success"] else "error")
 
+    elif cmd == "fill":
+        selector = data.get("selector", "")
+        text = data.get("text", "")
+        add_log("填入", f"{selector} = {text}", "info")
+        result = await ab_fill(selector, text)
+        add_log("填入結果", result["message"],
+                "success" if result["success"] else "error")
+
+    elif cmd == "snapshot":
+        add_log("Snapshot", "取得 Accessibility Tree", "info")
+        result = await ab_snapshot()
+        await ws.send_json({"type": "snapshot", "data": result})
+        add_log("Snapshot", f"{'成功' if result['success'] else '失敗'}",
+                "success" if result["success"] else "error")
+
+    elif cmd == "eval":
+        js = data.get("js", "")
+        add_log("JS 執行", js[:80], "info")
+        result = await ab_eval(js)
+        await ws.send_json({"type": "eval_result", "data": result})
+
     elif cmd == "status":
-        status = await browser_manager.get_browser_status()
+        status = await ab_get_status()
         await ws.send_json({"type": "status", "data": status})
 
     elif cmd == "close":
         add_log("關閉瀏覽器", "", "warning")
-        await browser_manager.close()
+        await ab_close()
 
     elif cmd == "get_logs":
         await ws.send_json({"type": "logs", "data": operation_logs[-50:]})
@@ -174,8 +284,7 @@ async def handle_ws_command(data: dict, ws: WebSocket):
 
 @app.get("/api/status")
 async def get_status():
-    from mcp_servers.browser.browser_manager import browser_manager
-    return await browser_manager.get_browser_status()
+    return await ab_get_status()
 
 
 @app.get("/api/logs")
@@ -185,8 +294,7 @@ async def get_logs():
 
 @app.get("/api/screenshots")
 async def list_screenshots():
-    from mcp_servers.browser.browser_manager import SCREENSHOTS_DIR
-    screenshots = sorted(Path(SCREENSHOTS_DIR).glob("*.png"), key=os.path.getmtime, reverse=True)
+    screenshots = sorted(SCREENSHOTS_DIR.glob("*.png"), key=os.path.getmtime, reverse=True)
     return {
         "screenshots": [
             {"name": s.name, "size_kb": round(s.stat().st_size / 1024, 1),
@@ -198,20 +306,18 @@ async def list_screenshots():
 
 @app.get("/screenshots/{filename}")
 async def serve_screenshot(filename: str):
-    from mcp_servers.browser.browser_manager import SCREENSHOTS_DIR
-    path = os.path.join(SCREENSHOTS_DIR, filename)
-    if os.path.exists(path):
-        return FileResponse(path)
-    return {"error": "not found"}
+    path = SCREENSHOTS_DIR / filename
+    if path.exists():
+        return FileResponse(str(path))
+    return JSONResponse({"error": "not found"}, status_code=404)
 
 
 # ============================================================
-# Clawalytics Proxy（避免 CORS 問題）
+# Clawalytics Proxy
 # ============================================================
 
 @app.get("/api/analytics/{path:path}")
 async def proxy_analytics(path: str, request: Request):
-    """代理轉發到 Clawalytics API"""
     import urllib.request
     import urllib.error
     target = f"{CLAWALYTICS_BASE}/api/{path}"
@@ -230,12 +336,13 @@ async def proxy_analytics(path: str, request: Request):
 
 @app.get("/api/health")
 async def health_check():
-    """統合健康檢查"""
     import urllib.request
     import urllib.error
 
+    status = await ab_get_status()
     health = {
         "monitor": "ok",
+        "browser": "running" if status["browser_running"] else "stopped",
         "clawalytics": "unknown",
         "clawalytics_url": CLAWALYTICS_BASE,
     }
@@ -294,9 +401,7 @@ MONITOR_HTML = """<!DOCTYPE html>
         .header-right {
             display: flex; align-items: center; gap: 12px; font-size: 12px;
         }
-        .status-indicator {
-            display: flex; align-items: center; gap: 6px;
-        }
+        .status-indicator { display: flex; align-items: center; gap: 6px; }
         .status-dot {
             width: 8px; height: 8px; border-radius: 50%;
             animation: pulse 2s infinite;
@@ -311,7 +416,7 @@ MONITOR_HTML = """<!DOCTYPE html>
         .tab-content.active { display: block; }
 
         /* -- Browser Monitor Tab -- */
-        .monitor-container { display: grid; grid-template-columns: 1fr 380px; height: 100%; }
+        .monitor-container { display: grid; grid-template-columns: 1fr 420px; height: 100%; }
         .preview-panel {
             background: #000; display: flex; flex-direction: column;
             align-items: center; justify-content: center; position: relative;
@@ -350,7 +455,21 @@ MONITOR_HTML = """<!DOCTYPE html>
         .btn-secondary:hover { background: #444; }
         .btn-danger { background: #cc3333; color: #fff; }
         .btn-danger:hover { background: #aa2222; }
+        .btn-green { background: #2a7a3a; color: #fff; }
+        .btn-green:hover { background: #1e6a2e; }
         .btn-group { display: flex; gap: 6px; flex-wrap: wrap; }
+
+        /* Snapshot panel */
+        .snapshot-panel {
+            padding: 8px; border-bottom: 1px solid #333;
+            max-height: 200px; overflow-y: auto;
+            font-family: 'Cascadia Code', 'Fira Code', monospace;
+            font-size: 11px; line-height: 1.5; color: #aaa;
+            background: #0a0e14; display: none;
+        }
+        .snapshot-panel.visible { display: block; }
+        .snapshot-panel .ref { color: #5599ff; cursor: pointer; }
+        .snapshot-panel .ref:hover { text-decoration: underline; }
 
         .logs {
             flex: 1; overflow-y: auto; padding: 8px;
@@ -375,11 +494,9 @@ MONITOR_HTML = """<!DOCTYPE html>
             display: flex; justify-content: space-between;
         }
 
-        /* -- Analytics Tab (clawalytics iframe) -- */
+        /* -- Analytics Tab -- */
         .analytics-container { height: 100%; position: relative; }
-        .analytics-container iframe {
-            width: 100%; height: 100%; border: none;
-        }
+        .analytics-container iframe { width: 100%; height: 100%; border: none; }
         .analytics-offline {
             display: flex; flex-direction: column; align-items: center;
             justify-content: center; height: 100%;
@@ -388,10 +505,6 @@ MONITOR_HTML = """<!DOCTYPE html>
         .analytics-offline .icon { font-size: 48px; }
         .analytics-offline h2 { color: #aaa; font-size: 20px; }
         .analytics-offline p { font-size: 14px; max-width: 500px; line-height: 1.6; }
-        .analytics-offline code {
-            background: #1a1a2e; padding: 3px 8px; border-radius: 4px;
-            font-family: 'Cascadia Code', monospace; font-size: 13px; color: #5599ff;
-        }
         .analytics-offline .cmd-box {
             background: #1a1a2e; border: 1px solid #333; border-radius: 8px;
             padding: 16px 24px; margin-top: 8px; text-align: left;
@@ -406,10 +519,8 @@ MONITOR_HTML = """<!DOCTYPE html>
         }
         .analytics-offline .retry-btn:hover { background: #0066dd; }
 
-        /* -- API Status Tab -- */
-        .api-status-container {
-            padding: 24px; overflow-y: auto; height: 100%;
-        }
+        /* -- Service Status Tab -- */
+        .api-status-container { padding: 24px; overflow-y: auto; height: 100%; }
         .api-grid {
             display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
             gap: 16px;
@@ -425,8 +536,7 @@ MONITOR_HTML = """<!DOCTYPE html>
         }
         .api-card-title { font-size: 14px; font-weight: 600; }
         .api-card-badge {
-            font-size: 11px; padding: 2px 8px; border-radius: 10px;
-            font-weight: 500;
+            font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: 500;
         }
         .api-card-badge.online { background: #00ff8822; color: #00ff88; }
         .api-card-badge.offline { background: #ff444422; color: #ff4444; }
@@ -442,6 +552,7 @@ MONITOR_HTML = """<!DOCTYPE html>
             <div class="tabs">
                 <button class="tab active" onclick="switchTab('monitor')">
                     <span>瀏覽器監控</span>
+                    <span class="badge" id="engineBadge">agent-browser</span>
                 </button>
                 <button class="tab" onclick="switchTab('analytics')">
                     <span>成本分析</span>
@@ -471,9 +582,10 @@ MONITOR_HTML = """<!DOCTYPE html>
                 <div class="preview-label" id="previewLabel">等待瀏覽器啟動...</div>
                 <img id="previewImg" style="display:none;" alt="Browser Preview">
                 <div class="no-preview" id="noPreview">
-                    <span style="font-size:36px">🌐</span><br><br>
+                    <span style="font-size:36px">&#127760;</span><br><br>
                     等待瀏覽器啟動
-                    <p>使用右側控制面板輸入 URL 開始</p>
+                    <p>使用右側控制面板輸入 URL 開始<br>
+                    <span style="color:#555;font-size:12px">Powered by agent-browser (Rust CLI)</span></p>
                 </div>
             </div>
             <div class="side-panel">
@@ -486,15 +598,17 @@ MONITOR_HTML = """<!DOCTYPE html>
                     </div>
                     <div class="btn-group">
                         <button class="btn btn-secondary" onclick="takeScreenshot()">截圖</button>
+                        <button class="btn btn-green" onclick="takeSnapshot()">Snapshot</button>
                         <button class="btn btn-secondary" onclick="getStatus()">狀態</button>
                         <button class="btn btn-danger" onclick="closeBrowser()">關閉</button>
                     </div>
                 </div>
+                <div class="snapshot-panel" id="snapshotPanel"></div>
                 <div class="logs" id="logsContainer">
                     <div class="log-entry info">
                         <span class="log-time">--:--:--</span>
                         <span class="log-action">系統</span>
-                        <span class="log-detail">監控面板已啟動，等待 WebSocket 連線...</span>
+                        <span class="log-detail">監控面板已啟動 (agent-browser v3.0)</span>
                     </div>
                 </div>
                 <div class="status-bar">
@@ -505,19 +619,16 @@ MONITOR_HTML = """<!DOCTYPE html>
         </div>
     </div>
 
-    <!-- Tab 2: Analytics (clawalytics) -->
+    <!-- Tab 2: Analytics -->
     <div class="tab-content" id="tab-analytics">
         <div class="analytics-container" id="analyticsContainer">
             <div class="analytics-offline" id="analyticsOffline">
-                <div class="icon">📊</div>
+                <div class="icon">&#128202;</div>
                 <h2>Clawalytics 成本分析面板</h2>
                 <p>追蹤 Claude Code 和 OpenClaw 的 AI 花費、Agent 效能、頻道使用量與安全監控。</p>
                 <div class="cmd-box">
                     <div><span class="comment"># 啟動 Clawalytics</span></div>
                     <div>npx clawalytics start --port 9174</div>
-                    <br>
-                    <div><span class="comment"># 或透過 npm script</span></div>
-                    <div>npm run analytics</div>
                 </div>
                 <button class="retry-btn" onclick="checkAnalytics()">檢查連線</button>
             </div>
@@ -584,9 +695,30 @@ MONITOR_HTML = """<!DOCTYPE html>
                     if (d.current_url) {
                         document.getElementById('pageInfo').textContent = d.current_title || d.current_url;
                         document.getElementById('previewLabel').textContent =
-                            '\\u{1f7e2} Chrome (headed) | ' + d.current_url;
+                            'agent-browser | ' + d.current_url;
+                    } else {
+                        document.getElementById('pageInfo').textContent = '瀏覽器未啟動';
+                        document.getElementById('previewLabel').textContent = '等待瀏覽器啟動...';
                     }
                     addLogUI('狀態', JSON.stringify(d), 'info');
+                }
+                else if (msg.type === 'snapshot') {
+                    const panel = document.getElementById('snapshotPanel');
+                    if (msg.data.success) {
+                        // Parse refs and make clickable
+                        let html = msg.data.tree
+                            .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                            .replace(/\\[ref=(e\\d+)\\]/g, '<span class="ref" onclick="clickRef(\'@$1\')">[ref=$1]</span>');
+                        panel.innerHTML = '<pre>' + html + '</pre>';
+                        panel.classList.add('visible');
+                    } else {
+                        panel.innerHTML = '<span style="color:#f66">' + msg.data.message + '</span>';
+                        panel.classList.add('visible');
+                    }
+                }
+                else if (msg.type === 'eval_result') {
+                    addLogUI('JS 結果', msg.data.result || msg.data.message,
+                             msg.data.success ? 'success' : 'error');
                 }
                 else if (msg.type === 'logs') {
                     msg.data.forEach(l => addLogUI(l.action, l.detail, l.status));
@@ -608,7 +740,7 @@ MONITOR_HTML = """<!DOCTYPE html>
             div.innerHTML =
                 '<span class="log-time">' + now + '</span>' +
                 '<span class="log-action">' + action + '</span>' +
-                '<span class="log-detail">' + detail + '</span>';
+                '<span class="log-detail">' + (detail||'').replace(/</g,'&lt;') + '</span>';
             container.appendChild(div);
             container.scrollTop = container.scrollHeight;
             while (container.children.length > 200) container.removeChild(container.firstChild);
@@ -621,18 +753,25 @@ MONITOR_HTML = """<!DOCTYPE html>
         function takeScreenshot() {
             if (ws) ws.send(JSON.stringify({command: 'screenshot'}));
         }
+        function takeSnapshot() {
+            if (ws) ws.send(JSON.stringify({command: 'snapshot'}));
+        }
         function getStatus() {
             if (ws) ws.send(JSON.stringify({command: 'status'}));
         }
         function closeBrowser() {
             if (confirm('確定要關閉瀏覽器？')) {
                 if (ws) ws.send(JSON.stringify({command: 'close'}));
+                document.getElementById('snapshotPanel').classList.remove('visible');
             }
         }
+        function clickRef(ref) {
+            addLogUI('點擊 Ref', ref, 'info');
+            if (ws) ws.send(JSON.stringify({command: 'click', selector: ref}));
+        }
 
-        /* ========== Analytics (Clawalytics) ========== */
+        /* ========== Analytics ========== */
         const CLAWALYTICS_URL = 'http://localhost:9174';
-        let analyticsOnline = false;
 
         async function checkAnalytics() {
             const dot = document.getElementById('analyticsDot');
@@ -640,7 +779,6 @@ MONITOR_HTML = """<!DOCTYPE html>
             const badge = document.getElementById('analyticsBadge');
             dot.className = 'status-dot unknown';
             statusEl.textContent = '檢查中...';
-
             try {
                 const res = await fetch(CLAWALYTICS_URL + '/api/stats', {
                     signal: AbortSignal.timeout(3000)
@@ -649,30 +787,19 @@ MONITOR_HTML = """<!DOCTYPE html>
                     const data = await res.json();
                     dot.className = 'status-dot active';
                     statusEl.textContent = 'Analytics';
-                    analyticsOnline = true;
-
-                    // Show iframe, hide offline message
                     document.getElementById('analyticsOffline').style.display = 'none';
                     const frame = document.getElementById('analyticsFrame');
                     frame.style.display = 'block';
                     if (frame.src === 'about:blank' || !frame.src.includes('9174')) {
                         frame.src = CLAWALYTICS_URL;
                     }
-
-                    // Update badge with today's cost if available
-                    if (data.daily_cost !== undefined) {
-                        badge.textContent = '$' + Number(data.daily_cost).toFixed(2);
-                    } else {
-                        badge.textContent = 'ON';
-                    }
-                } else {
-                    throw new Error('not ok');
-                }
+                    badge.textContent = data.daily_cost !== undefined
+                        ? '$' + Number(data.daily_cost).toFixed(2) : 'ON';
+                } else { throw new Error('not ok'); }
             } catch (e) {
                 dot.className = 'status-dot inactive';
                 statusEl.textContent = 'Analytics OFF';
                 badge.textContent = 'OFF';
-                analyticsOnline = false;
                 document.getElementById('analyticsOffline').style.display = 'flex';
                 document.getElementById('analyticsFrame').style.display = 'none';
             }
@@ -683,20 +810,11 @@ MONITOR_HTML = """<!DOCTYPE html>
             { name: '瀏覽器監控 API', url: '/api/status', type: 'local' },
             { name: 'Clawalytics', url: CLAWALYTICS_URL + '/api/stats', type: 'external',
               detail: '成本追蹤 / Agent 效能 / 安全監控' },
-            { name: 'Clawalytics Sessions', url: CLAWALYTICS_URL + '/api/sessions', type: 'external',
-              detail: 'Claude Code 工作階段歷史' },
-            { name: 'Clawalytics Agents', url: CLAWALYTICS_URL + '/api/agents', type: 'external',
-              detail: 'OpenClaw Agent 狀態' },
-            { name: 'Clawalytics Channels', url: CLAWALYTICS_URL + '/api/channels', type: 'external',
-              detail: 'WhatsApp / Telegram / Slack' },
-            { name: 'Clawalytics Security', url: CLAWALYTICS_URL + '/api/devices', type: 'external',
-              detail: '裝置配對 / 安全警報' },
         ];
 
         async function refreshApiStatus() {
             const grid = document.getElementById('apiGrid');
             grid.innerHTML = '';
-
             for (const svc of SERVICES) {
                 const card = document.createElement('div');
                 card.className = 'api-card';
@@ -708,21 +826,12 @@ MONITOR_HTML = """<!DOCTYPE html>
                     (svc.detail ? '<div class="api-card-detail">' + svc.detail + '</div>' : '') +
                     '<div class="api-card-url">' + svc.url + '</div>';
                 grid.appendChild(card);
-
-                // Fire and forget — update badge when done
                 (async (cardEl, service) => {
                     try {
-                        const res = await fetch(service.url, {
-                            signal: AbortSignal.timeout(3000)
-                        });
+                        const res = await fetch(service.url, { signal: AbortSignal.timeout(3000) });
                         const badge = cardEl.querySelector('.api-card-badge');
-                        if (res.ok) {
-                            badge.className = 'api-card-badge online';
-                            badge.textContent = res.status + ' OK';
-                        } else {
-                            badge.className = 'api-card-badge offline';
-                            badge.textContent = res.status;
-                        }
+                        badge.className = 'api-card-badge ' + (res.ok ? 'online' : 'offline');
+                        badge.textContent = res.ok ? res.status + ' OK' : res.status;
                     } catch (e) {
                         const badge = cardEl.querySelector('.api-card-badge');
                         badge.className = 'api-card-badge offline';
