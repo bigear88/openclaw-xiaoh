@@ -70,19 +70,28 @@ def send_telegram(text: str) -> bool:
         return False
 
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    data = urllib.parse.urlencode({
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "Markdown",
-    }).encode()
 
-    try:
-        req = urllib.request.Request(url, data=data, method="POST")
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return resp.status == 200
-    except Exception as e:
-        logger.error(f"Telegram 發送失敗: {e}")
-        return False
+    # 先嘗試 Markdown，失敗則改用純文字（避免 JSON 特殊字元導致 400）
+    for parse_mode in ("Markdown", None):
+        params = {"chat_id": chat_id, "text": text}
+        if parse_mode:
+            params["parse_mode"] = parse_mode
+        data = urllib.parse.urlencode(params).encode()
+
+        try:
+            req = urllib.request.Request(url, data=data, method="POST")
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return resp.status == 200
+        except urllib.error.HTTPError as e:
+            if e.code == 400 and parse_mode:
+                logger.warning("Telegram Markdown 解析失敗，改用純文字")
+                continue
+            logger.error(f"Telegram 發送失敗: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Telegram 發送失敗: {e}")
+            return False
+    return False
 
 
 # ── 檢查函式 ─────────────────────────────────────────────────────────
