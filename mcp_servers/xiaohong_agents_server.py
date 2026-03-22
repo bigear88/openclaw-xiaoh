@@ -148,6 +148,10 @@ class AgentLoader:
         "briefing_agent": ("agents.briefing_agent", "BriefingAgent"),
         "bible_agent": ("agents.bible_agent", "BibleAgent"),
         "telegram_channel_agent": ("agents.telegram_channel.agent", "TelegramChannelAgent"),
+        "web_search_agent": ("agents.web_search_agent", "WebSearchAgent"),
+        "notion_sync_agent": ("agents.notion_sync_agent", "NotionSyncAgent"),
+        "model_manager_agent": ("agents.model_manager_agent", "ModelManagerAgent"),
+        "meal_expense_agent": ("agents.meal_expense_agent", "MealExpenseAgent"),
     }
 
     def __init__(self):
@@ -270,6 +274,50 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "message": {"type": "string", "description": "指令，如「整理頻道」「頻道摘要」"}
+            },
+            "required": ["message"],
+        },
+    ),
+    Tool(
+        name="web_search_agent",
+        description="網路搜尋 agent。使用 OpenManus 瀏覽器技術搜尋網頁、新聞、股價、天氣等資訊，替代 Brave Search API。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "description": "搜尋關鍵字或查詢內容"}
+            },
+            "required": ["message"],
+        },
+    ),
+    Tool(
+        name="notion_sync_agent",
+        description="Notion 同步 agent。將小虹秘書各 Agent 的資料同步到 Notion 工作空間，建立完整的資料管理系統。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "description": "同步指令，如「初始化」「同步Agent」「狀態報告」"}
+            },
+            "required": ["message"],
+        },
+    ),
+    Tool(
+        name="model_manager_agent",
+        description="Claude 模型管理 agent。管理和切換 Anthropic Claude 模型，提供模型選擇、配置檔案和效能比較功能。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "description": "模型管理指令，如「顯示模型」「切換模型 claude-3-5-sonnet」「配置檔案 均衡配置」"}
+            },
+            "required": ["message"],
+        },
+    ),
+    Tool(
+        name="meal_expense_agent",
+        description="飲食消費記錄 agent。將飲食和消費資料寫入 Notion 的飲食記錄和消費記錄資料庫。輸入必須是 JSON 格式，包含 meal_type（餐別）、restaurant（店家）、items（品項陣列，每項含 name/calories/protein/carbs/fat）、total_amount（金額）、address（地址）、map_url（地圖連結）等欄位。AI 模型須先分析熱量再呼叫此工具。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "description": "JSON 格式的飲食消費資料"}
             },
             "required": ["message"],
         },
