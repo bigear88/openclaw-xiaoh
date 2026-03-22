@@ -106,42 +106,55 @@ class MealExpenseAgent(BaseAgent):
         date_str = now.strftime("%Y-%m-%d")
         results = []
 
-        # 1. 寫入飲食記錄
+        # 1. 寫入飲食記錄（一筆，品項營養素寫在頁面內容）
         items = data.get("items", [])
         meal_type = data.get("meal_type", "其他")
         restaurant = data.get("restaurant", "")
-        diet_ids = []
 
+        total_cal = sum(i.get("calories", 0) for i in items)
+        total_protein = sum(i.get("protein", 0) for i in items)
+        total_carbs = sum(i.get("carbs", 0) for i in items)
+        total_fat = sum(i.get("fat", 0) for i in items)
+
+        item_names = "、".join(i.get("name", "") for i in items)
+        diet_title = f"{restaurant} — {item_names}" if restaurant else item_names
+
+        # 頁面內容：每個品項的營養明細
+        diet_children = []
         for item in items:
-            name = item.get("name", "未知品項")
-            try:
-                page = _notion_request("POST", "pages", {
-                    "parent": {"database_id": DIET_DB_ID},
-                    "properties": {
-                        "品項": {"title": [{"text": {"content": name}}]},
-                        "餐別": {"select": {"name": meal_type}},
-                        "日期": {"date": {"start": date_str}},
-                        "卡路里 (kcal)": {"number": item.get("calories", 0)},
-                        "蛋白質 (g)": {"number": item.get("protein", 0)},
-                        "碳水化合物 (g)": {"number": item.get("carbs", 0)},
-                        "脂肪 (g)": {"number": item.get("fat", 0)},
-                        "備註": {"rich_text": [{"text": {"content": f"店家: {restaurant}"}}]},
-                    },
-                }, token)
-                diet_ids.append(page["id"])
-            except Exception as e:
-                results.append(f"❌ 飲食記錄 [{name}] 失敗: {e}")
+            diet_children.append({
+                "object": "block",
+                "type": "bulleted_list_item",
+                "bulleted_list_item": {"rich_text": [{"text": {"content":
+                    f"{item.get('name', '?')}: {item.get('calories', 0)} kcal "
+                    f"(蛋白質 {item.get('protein', 0)}g / "
+                    f"碳水 {item.get('carbs', 0)}g / "
+                    f"脂肪 {item.get('fat', 0)}g)"
+                }}]},
+            })
 
-        if diet_ids:
-            total_cal = sum(i.get("calories", 0) for i in items)
-            total_protein = sum(i.get("protein", 0) for i in items)
-            total_carbs = sum(i.get("carbs", 0) for i in items)
-            total_fat = sum(i.get("fat", 0) for i in items)
+        try:
+            _notion_request("POST", "pages", {
+                "parent": {"database_id": DIET_DB_ID},
+                "properties": {
+                    "品項": {"title": [{"text": {"content": diet_title[:100]}}]},
+                    "餐別": {"select": {"name": meal_type}},
+                    "日期": {"date": {"start": date_str}},
+                    "卡路里 (kcal)": {"number": total_cal},
+                    "蛋白質 (g)": {"number": total_protein},
+                    "碳水化合物 (g)": {"number": total_carbs},
+                    "脂肪 (g)": {"number": total_fat},
+                    "備註": {"rich_text": [{"text": {"content": f"店家: {restaurant}"}}]},
+                },
+                "children": diet_children,
+            }, token)
             results.append(
-                f"🍽️ 飲食記錄已寫入 {len(diet_ids)} 筆\n"
+                f"🍽️ 飲食記錄已寫入\n"
                 f"   總熱量: {total_cal} kcal | 蛋白質: {total_protein}g | "
                 f"碳水: {total_carbs}g | 脂肪: {total_fat}g"
             )
+        except Exception as e:
+            results.append(f"❌ 飲食記錄寫入失敗: {e}")
 
         # 2. 寫入消費記錄
         amount = data.get("total_amount", 0)
